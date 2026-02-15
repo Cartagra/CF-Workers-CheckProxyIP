@@ -1,511 +1,539 @@
 import { connect } from "cloudflare:sockets";
 let 临时TOKEN, 永久TOKEN;
 export default {
-  async fetch(request, env, ctx) {
-    const 网站图标 = env.ICO || 'https://cf-assets.www.cloudflare.com/dzlvafdwdttg/19kSkLSfWtDcspvQI5pit4/c5630cf25d589a0de91978ca29486259/performance-acceleration-bolt.svg';
-    const url = new URL(request.url);
-    const UA = request.headers.get('User-Agent') || 'null';
-    const path = url.pathname;
-    const hostname = url.hostname;
-    const currentDate = new Date();
-    const timestamp = Math.ceil(currentDate.getTime() / (1000 * 60 * 31)); // 每31分钟一个时间戳
-    临时TOKEN = await 双重哈希(url.hostname + timestamp + UA);
-    永久TOKEN = env.TOKEN || 临时TOKEN;
+    async fetch(request, env, ctx) {
+        const 网站图标 = env.ICO || 'https://cf-assets.www.cloudflare.com/dzlvafdwdttg/19kSkLSfWtDcspvQI5pit4/c5630cf25d589a0de91978ca29486259/performance-acceleration-bolt.svg';
+        const url = new URL(request.url);
+        const UA = request.headers.get('User-Agent') || 'null';
+        const path = url.pathname;
+        const hostname = url.hostname;
+        const currentDate = new Date();
+        const timestamp = Math.ceil(currentDate.getTime() / (1000 * 60 * 31)); // 每31分钟一个时间戳
+        临时TOKEN = await 双重哈希(url.hostname + timestamp + UA);
+        永久TOKEN = env.TOKEN || 临时TOKEN;
 
-    // 不区分大小写检查路径
-    if (path.toLowerCase() === '/check') {
-      if (!url.searchParams.has('proxyip')) return new Response('Missing proxyip parameter', { status: 400 });
-      if (url.searchParams.get('proxyip') === '') return new Response('Invalid proxyip parameter', { status: 400 });
-      if (!url.searchParams.get('proxyip').includes('.') && !(url.searchParams.get('proxyip').includes('[') && url.searchParams.get('proxyip').includes(']'))) return new Response('Invalid proxyip format', { status: 400 });
+        // 不区分大小写检查路径
+        if (path.toLowerCase() === '/check') {
+            if (!url.searchParams.has('proxyip')) return new Response('Missing proxyip parameter', { status: 400 });
+            if (url.searchParams.get('proxyip') === '') return new Response('Invalid proxyip parameter', { status: 400 });
+            if (!url.searchParams.get('proxyip').includes('.') && !(url.searchParams.get('proxyip').includes('[') && url.searchParams.get('proxyip').includes(']'))) return new Response('Invalid proxyip format', { status: 400 });
 
-      if (env.TOKEN) {
-        if (!url.searchParams.has('token') || url.searchParams.get('token') !== 永久TOKEN) {
-          return new Response(JSON.stringify({
-            status: "error",
-            message: `ProxyIP查询失败: 无效的TOKEN`,
-            timestamp: new Date().toISOString()
-          }, null, 4), {
-            status: 403,
-            headers: {
-              "content-type": "application/json; charset=UTF-8",
-              'Access-Control-Allow-Origin': '*'
+            if (env.TOKEN) {
+                if (!url.searchParams.has('token') || url.searchParams.get('token') !== 永久TOKEN) {
+                    return new Response(JSON.stringify({
+                        status: "error",
+                        message: `ProxyIP查询失败: 无效的TOKEN`,
+                        timestamp: new Date().toISOString()
+                    }, null, 4), {
+                        status: 403,
+                        headers: {
+                            "content-type": "application/json; charset=UTF-8",
+                            'Access-Control-Allow-Origin': '*'
+                        }
+                    });
+                }
             }
-          });
+
+            // 获取参数中的IP或使用默认IP
+            const proxyIP = url.searchParams.get('proxyip').toLowerCase();
+            const colo = request.cf?.colo || 'CF';
+            // 调用CheckProxyIP函数
+            const result = await CheckProxyIP(proxyIP, colo);
+
+            // 返回JSON响应，根据检查结果设置不同的状态码
+            return new Response(JSON.stringify(result, null, 2), {
+                status: result.success ? 200 : 502,
+                headers: {
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            });
+        } else if (path.toLowerCase() === '/resolve') {
+            if (!url.searchParams.has('token') || (url.searchParams.get('token') !== 临时TOKEN) && (url.searchParams.get('token') !== 永久TOKEN)) {
+                return new Response(JSON.stringify({
+                    status: "error",
+                    message: `域名查询失败: 无效的TOKEN`,
+                    timestamp: new Date().toISOString()
+                }, null, 4), {
+                    status: 403,
+                    headers: {
+                        "content-type": "application/json; charset=UTF-8",
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            }
+            if (!url.searchParams.has('domain')) return new Response('Missing domain parameter', { status: 400 });
+            const domain = url.searchParams.get('domain');
+
+            try {
+                const ips = await resolveDomain(domain);
+                return new Response(JSON.stringify({ success: true, domain, ips }), {
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Access-Control-Allow-Origin": "*"
+                    }
+                });
+            } catch (error) {
+                return new Response(JSON.stringify({ success: false, error: error.message }), {
+                    status: 500,
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Access-Control-Allow-Origin": "*"
+                    }
+                });
+            }
+        } else if (path.toLowerCase() === '/ip-info') {
+            if (!url.searchParams.has('token') || (url.searchParams.get('token') !== 临时TOKEN) && (url.searchParams.get('token') !== 永久TOKEN)) {
+                return new Response(JSON.stringify({
+                    status: "error",
+                    message: `IP查询失败: 无效的TOKEN`,
+                    timestamp: new Date().toISOString()
+                }, null, 4), {
+                    status: 403,
+                    headers: {
+                        "content-type": "application/json; charset=UTF-8",
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            }
+            let ip = url.searchParams.get('ip') || request.headers.get('CF-Connecting-IP');
+            if (!ip) {
+                return new Response(JSON.stringify({
+                    status: "error",
+                    message: "IP参数未提供",
+                    code: "MISSING_PARAMETER",
+                    timestamp: new Date().toISOString()
+                }, null, 4), {
+                    status: 400,
+                    headers: {
+                        "content-type": "application/json; charset=UTF-8",
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            }
+
+            if (ip.includes('[')) {
+                ip = ip.replace('[', '').replace(']', '');
+            }
+
+            try {
+                // 使用Worker代理请求HTTP的IP API
+                const response = await fetch(`http://ip-api.com/json/${ip}?lang=zh-CN`);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                // 添加时间戳到成功的响应数据中
+                data.timestamp = new Date().toISOString();
+
+                // 返回数据给客户端，并添加CORS头
+                return new Response(JSON.stringify(data, null, 4), {
+                    headers: {
+                        "content-type": "application/json; charset=UTF-8",
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+
+            } catch (error) {
+                console.error("IP查询失败:", error);
+                return new Response(JSON.stringify({
+                    status: "error",
+                    message: `IP查询失败: ${error.message}`,
+                    code: "API_REQUEST_FAILED",
+                    query: ip,
+                    timestamp: new Date().toISOString(),
+                    details: {
+                        errorType: error.name,
+                        stack: error.stack ? error.stack.split('\n')[0] : null
+                    }
+                }, null, 4), {
+                    status: 500,
+                    headers: {
+                        "content-type": "application/json; charset=UTF-8",
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            }
+        } else {
+            const envKey = env.URL302 ? 'URL302' : (env.URL ? 'URL' : null);
+            if (envKey) {
+                const URLs = await 整理(env[envKey]);
+                const URL = URLs[Math.floor(Math.random() * URLs.length)];
+                return envKey === 'URL302' ? Response.redirect(URL, 302) : fetch(new Request(URL, request));
+            } else if (env.TOKEN) {
+                return new Response(await nginx(), {
+                    headers: {
+                        'Content-Type': 'text/html; charset=UTF-8',
+                    },
+                });
+            } else if (path.toLowerCase() === '/favicon.ico') {
+                return Response.redirect(网站图标, 302);
+            }
+            // 直接返回HTML页面，路径解析交给前端处理
+            return await HTML(hostname, 网站图标);
         }
-      }
-
-      // 获取参数中的IP或使用默认IP
-      const proxyIP = url.searchParams.get('proxyip').toLowerCase();
-      const colo = request.cf?.colo || 'CF';
-      // 调用CheckProxyIP函数
-      const result = await CheckProxyIP(proxyIP, colo);
-
-      // 返回JSON响应，根据检查结果设置不同的状态码
-      return new Response(JSON.stringify(result, null, 2), {
-        status: result.success ? 200 : 502,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
-    } else if (path.toLowerCase() === '/resolve') {
-      if (!url.searchParams.has('token') || (url.searchParams.get('token') !== 临时TOKEN) && (url.searchParams.get('token') !== 永久TOKEN)) {
-        return new Response(JSON.stringify({
-          status: "error",
-          message: `域名查询失败: 无效的TOKEN`,
-          timestamp: new Date().toISOString()
-        }, null, 4), {
-          status: 403,
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      }
-      if (!url.searchParams.has('domain')) return new Response('Missing domain parameter', { status: 400 });
-      const domain = url.searchParams.get('domain');
-
-      try {
-        const ips = await resolveDomain(domain);
-        return new Response(JSON.stringify({ success: true, domain, ips }), {
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*"
-          }
-        });
-      } catch (error) {
-        return new Response(JSON.stringify({ success: false, error: error.message }), {
-          status: 500,
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*"
-          }
-        });
-      }
-    } else if (path.toLowerCase() === '/ip-info') {
-      if (!url.searchParams.has('token') || (url.searchParams.get('token') !== 临时TOKEN) && (url.searchParams.get('token') !== 永久TOKEN)) {
-        return new Response(JSON.stringify({
-          status: "error",
-          message: `IP查询失败: 无效的TOKEN`,
-          timestamp: new Date().toISOString()
-        }, null, 4), {
-          status: 403,
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      }
-      let ip = url.searchParams.get('ip') || request.headers.get('CF-Connecting-IP');
-      if (!ip) {
-        return new Response(JSON.stringify({
-          status: "error",
-          message: "IP参数未提供",
-          code: "MISSING_PARAMETER",
-          timestamp: new Date().toISOString()
-        }, null, 4), {
-          status: 400,
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      }
-
-      if (ip.includes('[')) {
-        ip = ip.replace('[', '').replace(']', '');
-      }
-
-      try {
-        // 使用Worker代理请求HTTP的IP API
-        const response = await fetch(`http://ip-api.com/json/${ip}?lang=zh-CN`);
-
-        if (!response.ok) {
-          throw new Error(`HTTP error: ${response.status}`);
-        }
-
-        const data = await response.json();
-
-        // 添加时间戳到成功的响应数据中
-        data.timestamp = new Date().toISOString();
-
-        // 返回数据给客户端，并添加CORS头
-        return new Response(JSON.stringify(data, null, 4), {
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-
-      } catch (error) {
-        console.error("IP查询失败:", error);
-        return new Response(JSON.stringify({
-          status: "error",
-          message: `IP查询失败: ${error.message}`,
-          code: "API_REQUEST_FAILED",
-          query: ip,
-          timestamp: new Date().toISOString(),
-          details: {
-            errorType: error.name,
-            stack: error.stack ? error.stack.split('\n')[0] : null
-          }
-        }, null, 4), {
-          status: 500,
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      }
-    } else {
-      const envKey = env.URL302 ? 'URL302' : (env.URL ? 'URL' : null);
-      if (envKey) {
-        const URLs = await 整理(env[envKey]);
-        const URL = URLs[Math.floor(Math.random() * URLs.length)];
-        return envKey === 'URL302' ? Response.redirect(URL, 302) : fetch(new Request(URL, request));
-      } else if (env.TOKEN) {
-        return new Response(await nginx(), {
-          headers: {
-            'Content-Type': 'text/html; charset=UTF-8',
-          },
-        });
-      } else if (path.toLowerCase() === '/favicon.ico') {
-        return Response.redirect(网站图标, 302);
-      }
-      // 直接返回HTML页面，路径解析交给前端处理
-      return await HTML(hostname, 网站图标);
     }
-  }
 };
 
 // 新增域名解析函数
 async function resolveDomain(domain) {
-  domain = domain.includes(':') ? domain.split(':')[0] : domain;
-  try {
-    // 并发请求IPv4和IPv6记录
-    const [ipv4Response, ipv6Response] = await Promise.all([
-      fetch(`https://1.1.1.1/dns-query?name=${domain}&type=A`, {
-        headers: { 'Accept': 'application/dns-json' }
-      }),
-      fetch(`https://1.1.1.1/dns-query?name=${domain}&type=AAAA`, {
-        headers: { 'Accept': 'application/dns-json' }
-      })
-    ]);
+    domain = domain.includes(':') ? domain.split(':')[0] : domain;
 
-    const [ipv4Data, ipv6Data] = await Promise.all([
-      ipv4Response.json(),
-      ipv6Response.json()
-    ]);
+    // 定义 DNS 提供商列表
+    const providers = [
+        {
+            name: 'Cloudflare',
+            v4: `https://1.1.1.1/dns-query?name=${domain}&type=A`,
+            v6: `https://1.1.1.1/dns-query?name=${domain}&type=AAAA`,
+            headers: { 'Accept': 'application/dns-json' }
+        },
+        {
+            name: 'Google',
+            v4: `https://dns.google/resolve?name=${domain}&type=A`,
+            v6: `https://dns.google/resolve?name=${domain}&type=AAAA`,
+            headers: { 'Accept': 'application/json' }
+        }
+    ];
 
-    const ips = [];
+    let lastError = null;
 
-    // 添加IPv4地址
-    if (ipv4Data.Answer) {
-      const ipv4Addresses = ipv4Data.Answer
-        .filter(record => record.type === 1) // A记录
-        .map(record => record.data);
-      ips.push(...ipv4Addresses);
+    for (const provider of providers) {
+        try {
+            // 并发请求 IPv4 和 IPv6
+            const [resV4, resV6] = await Promise.all([
+                fetch(provider.v4, { headers: provider.headers }),
+                fetch(provider.v6, { headers: provider.headers })
+            ]);
+
+            // 安全检查：如果不是 200 OK，跳过此提供商
+            if (!resV4.ok || !resV6.ok) {
+                throw new Error(`${provider.name} returned status ${resV4.status}/${resV6.status}`);
+            }
+
+            // 获取文本内容并检查是否为有效 JSON (防止 1016 错误页导致崩溃)
+            const textV4 = await resV4.text();
+            const textV6 = await resV6.text();
+
+            if (!textV4.startsWith('{') || !textV6.startsWith('{')) {
+                throw new Error(`${provider.name} response is not valid JSON (might be 1016 error)`);
+            }
+
+            const ipv4Data = JSON.parse(textV4);
+            const ipv6Data = JSON.parse(textV6);
+
+            const ips = [];
+
+            // 解析 A 记录
+            if (ipv4Data.Answer) {
+                ipv4Data.Answer.filter(r => r.type === 1).forEach(r => ips.push(r.data));
+            }
+
+            // 解析 AAAA 记录
+            if (ipv6Data.Answer) {
+                ipv6Data.Answer.filter(r => r.type === 28).forEach(r => ips.push(`[${r.data}]`));
+            }
+
+            // 如果当前提供商找到了 IP，直接返回结果
+            if (ips.length > 0) {
+                return ips;
+            } else {
+                lastError = `No records found via ${provider.name}`;
+            }
+        } catch (error) {
+            console.error(`DNS Provider ${provider.name} failed:`, error.message);
+            lastError = error.message;
+            // 继续循环，尝试下一个提供商
+        }
     }
 
-    // 添加IPv6地址
-    if (ipv6Data.Answer) {
-      const ipv6Addresses = ipv6Data.Answer
-        .filter(record => record.type === 28) // AAAA记录
-        .map(record => `[${record.data}]`); // IPv6地址用方括号包围
-      ips.push(...ipv6Addresses);
-    }
-
-    if (ips.length === 0) {
-      throw new Error('No A or AAAA records found');
-    }
-
-    return ips;
-  } catch (error) {
-    throw new Error(`DNS resolution failed: ${error.message}`);
-  }
+    // 如果所有提供商都试过了还没结果
+    throw new Error(lastError || 'All DNS providers failed');
 }
 
 async function CheckProxyIP(proxyIP, colo = 'CF') {
-  let portRemote = 443;
-  if (proxyIP.includes('.tp')) {
-    const portMatch = proxyIP.match(/\.tp(\d+)\./);
-    if (portMatch) portRemote = parseInt(portMatch[1]);
-  } else if (proxyIP.includes('[') && proxyIP.includes(']:')) {
-    portRemote = parseInt(proxyIP.split(']:')[1]);
-    proxyIP = proxyIP.split(']:')[0] + ']';
-  } else if (proxyIP.includes(':')) {
-    portRemote = parseInt(proxyIP.split(':')[1]);
-    proxyIP = proxyIP.split(':')[0];
-  }
+    let portRemote = 443;
+    if (proxyIP.includes('.tp')) {
+        const portMatch = proxyIP.match(/\.tp(\d+)\./);
+        if (portMatch) portRemote = parseInt(portMatch[1]);
+    } else if (proxyIP.includes('[') && proxyIP.includes(']:')) {
+        portRemote = parseInt(proxyIP.split(']:')[1]);
+        proxyIP = proxyIP.split(']:')[0] + ']';
+    } else if (proxyIP.includes(':')) {
+        portRemote = parseInt(proxyIP.split(':')[1]);
+        proxyIP = proxyIP.split(':')[0];
+    }
 
-  const tcpSocket = connect({
-    hostname: proxyIP,
-    port: portRemote,
-  });
+    const tcpSocket = connect({
+        hostname: proxyIP,
+        port: portRemote,
+    });
 
-  try {
-    // 构建HTTP GET请求
-    const httpRequest =
-      "GET /cdn-cgi/trace HTTP/1.1\r\n" +
-      "Host: speed.cloudflare.com\r\n" +
-      "User-Agent: CheckProxyIP/cmliu\r\n" +
-      "Connection: close\r\n\r\n";
+    try {
+        // 构建HTTP GET请求
+        const httpRequest =
+            "GET /cdn-cgi/trace HTTP/1.1\r\n" +
+            "Host: speed.cloudflare.com\r\n" +
+            "User-Agent: CheckProxyIP/cmliu\r\n" +
+            "Connection: close\r\n\r\n";
 
-    // 发送HTTP请求
-    const writer = tcpSocket.writable.getWriter();
-    await writer.write(new TextEncoder().encode(httpRequest));
-    writer.releaseLock();
+        // 发送HTTP请求
+        const writer = tcpSocket.writable.getWriter();
+        await writer.write(new TextEncoder().encode(httpRequest));
+        writer.releaseLock();
 
-    // 读取HTTP响应
-    const reader = tcpSocket.readable.getReader();
-    let responseData = new Uint8Array(0);
-    let receivedData = false;
+        // 读取HTTP响应
+        const reader = tcpSocket.readable.getReader();
+        let responseData = new Uint8Array(0);
+        let receivedData = false;
 
-    // 读取所有可用数据
-    while (true) {
-      const { value, done } = await Promise.race([
-        reader.read(),
-        new Promise(resolve => setTimeout(() => resolve({ done: true }), 5000)) // 5秒超时
-      ]);
+        // 读取所有可用数据
+        while (true) {
+            const { value, done } = await Promise.race([
+                reader.read(),
+                new Promise(resolve => setTimeout(() => resolve({ done: true }), 5000)) // 5秒超时
+            ]);
 
-      if (done) break;
-      if (value) {
-        receivedData = true;
-        // 合并数据
-        const newData = new Uint8Array(responseData.length + value.length);
-        newData.set(responseData);
-        newData.set(value, responseData.length);
-        responseData = newData;
+            if (done) break;
+            if (value) {
+                receivedData = true;
+                // 合并数据
+                const newData = new Uint8Array(responseData.length + value.length);
+                newData.set(responseData);
+                newData.set(value, responseData.length);
+                responseData = newData;
 
-        // 检查是否接收到完整响应
-        const responseText = new TextDecoder().decode(responseData);
-        if (responseText.includes("\r\n\r\n") &&
-          (responseText.includes("Connection: close") || responseText.includes("content-length"))) {
-          break;
+                // 检查是否接收到完整响应
+                const responseText = new TextDecoder().decode(responseData);
+                if (responseText.includes("\r\n\r\n") &&
+                    (responseText.includes("Connection: close") || responseText.includes("content-length"))) {
+                    break;
+                }
+            }
         }
-      }
+        reader.releaseLock();
+
+        // 解析HTTP响应
+        const responseText = new TextDecoder().decode(responseData);
+        const statusMatch = responseText.match(/^HTTP\/\d\.\d\s+(\d+)/i);
+        const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
+
+        // 判断是否成功
+        function isValidProxyResponse(responseText, responseData) {
+            const statusMatch = responseText.match(/^HTTP\/\d\.\d\s+(\d+)/i);
+            const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
+            const looksLikeCloudflare = responseText.includes("cloudflare") && responseText.includes("CF-RAY");
+            const isExpectedError = responseText.includes("The plain HTTP request was sent to HTTPS port") && responseText.includes("400 Bad Request");
+            const hasBody = responseData.length > 100;
+
+            return statusCode !== null && looksLikeCloudflare && isExpectedError && hasBody;
+        }
+        // 关闭连接
+        await tcpSocket.close();
+
+        const isSuccessful = isValidProxyResponse(responseText, responseData);
+        if (isSuccessful) {
+            console.log(`成功通过ProxyIP ${proxyIP}:${portRemote} 连接到Cloudflare，状态码: ${statusCode} 响应内容: ${responseText}`);
+            const tls握手 = await 验证反代IP(proxyIP, portRemote);
+
+            // 构建JSON响应
+            const jsonResponse = {
+                success: tls握手[0],
+                proxyIP: proxyIP,
+                portRemote: portRemote,
+                colo: colo,
+                responseTime: tls握手[2] ? tls握手[2] : -1,
+                message: tls握手[1],
+                timestamp: new Date().toISOString(),
+            };
+            return jsonResponse;
+        } else {
+            console.log(`无法通过ProxyIP ${proxyIP}:${portRemote} 访问Cloudflare，状态码: ${statusCode} 响应内容: ${responseText}`);
+            return {
+                success: false,
+                proxyIP: proxyIP,
+                portRemote: portRemote,
+                colo: colo,
+                responseTime: -1,
+                message: "无法通过ProxyIP访问Cloudflare",
+                timestamp: new Date().toISOString()
+            };
+        }
+    } catch (error) {
+        // 连接失败，返回失败的JSON
+        return {
+            success: false,
+            proxyIP: -1,
+            portRemote: -1,
+            colo: colo,
+            responseTime: -1,
+            message: error.message || error.toString(),
+            timestamp: new Date().toISOString()
+        };
     }
-    reader.releaseLock();
-
-    // 解析HTTP响应
-    const responseText = new TextDecoder().decode(responseData);
-    const statusMatch = responseText.match(/^HTTP\/\d\.\d\s+(\d+)/i);
-    const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
-
-    // 判断是否成功
-    function isValidProxyResponse(responseText, responseData) {
-      const statusMatch = responseText.match(/^HTTP\/\d\.\d\s+(\d+)/i);
-      const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
-      const looksLikeCloudflare = responseText.includes("cloudflare") && responseText.includes("CF-RAY");
-      const isExpectedError = responseText.includes("The plain HTTP request was sent to HTTPS port") && responseText.includes("400 Bad Request");
-      const hasBody = responseData.length > 100;
-
-      return statusCode !== null && looksLikeCloudflare && isExpectedError && hasBody;
-    }
-    // 关闭连接
-    await tcpSocket.close();
-
-    const isSuccessful = isValidProxyResponse(responseText, responseData);
-    if (isSuccessful) {
-      console.log(`成功通过ProxyIP ${proxyIP}:${portRemote} 连接到Cloudflare，状态码: ${statusCode} 响应内容: ${responseText}`);
-      const tls握手 = await 验证反代IP(proxyIP, portRemote);
-
-      // 构建JSON响应
-      const jsonResponse = {
-        success: tls握手[0],
-        proxyIP: proxyIP,
-        portRemote: portRemote,
-        colo: colo,
-        responseTime: tls握手[2] ? tls握手[2] : -1,
-        message: tls握手[1],
-        timestamp: new Date().toISOString(),
-      };
-      return jsonResponse;
-    } else {
-      console.log(`无法通过ProxyIP ${proxyIP}:${portRemote} 访问Cloudflare，状态码: ${statusCode} 响应内容: ${responseText}`);
-      return {
-        success: false,
-        proxyIP: proxyIP,
-        portRemote: portRemote,
-        colo: colo,
-        responseTime: -1,
-        message: "无法通过ProxyIP访问Cloudflare",
-        timestamp: new Date().toISOString()
-      };
-    }
-  } catch (error) {
-    // 连接失败，返回失败的JSON
-    return {
-      success: false,
-      proxyIP: -1,
-      portRemote: -1,
-      colo: colo,
-      responseTime: -1,
-      message: error.message || error.toString(),
-      timestamp: new Date().toISOString()
-    };
-  }
 }
 
 async function 整理(内容) {
-  var 替换后的内容 = 内容.replace(/[\r\n]+/g, '|').replace(/\|+/g, '|');
-  const 地址数组 = 替换后的内容.split('|');
-  const 整理数组 = 地址数组.filter((item, index) => {
-    return item !== '' && 地址数组.indexOf(item) === index;
-  });
+    var 替换后的内容 = 内容.replace(/[\r\n]+/g, '|').replace(/\|+/g, '|');
+    const 地址数组 = 替换后的内容.split('|');
+    const 整理数组 = 地址数组.filter((item, index) => {
+        return item !== '' && 地址数组.indexOf(item) === index;
+    });
 
-  return 整理数组;
+    return 整理数组;
 }
 
 async function 双重哈希(文本) {
-  const 编码器 = new TextEncoder();
+    const 编码器 = new TextEncoder();
 
-  const 第一次哈希 = await crypto.subtle.digest('MD5', 编码器.encode(文本));
-  const 第一次哈希数组 = Array.from(new Uint8Array(第一次哈希));
-  const 第一次十六进制 = 第一次哈希数组.map(字节 => 字节.toString(16).padStart(2, '0')).join('');
+    const 第一次哈希 = await crypto.subtle.digest('MD5', 编码器.encode(文本));
+    const 第一次哈希数组 = Array.from(new Uint8Array(第一次哈希));
+    const 第一次十六进制 = 第一次哈希数组.map(字节 => 字节.toString(16).padStart(2, '0')).join('');
 
-  const 第二次哈希 = await crypto.subtle.digest('MD5', 编码器.encode(第一次十六进制.slice(7, 27)));
-  const 第二次哈希数组 = Array.from(new Uint8Array(第二次哈希));
-  const 第二次十六进制 = 第二次哈希数组.map(字节 => 字节.toString(16).padStart(2, '0')).join('');
+    const 第二次哈希 = await crypto.subtle.digest('MD5', 编码器.encode(第一次十六进制.slice(7, 27)));
+    const 第二次哈希数组 = Array.from(new Uint8Array(第二次哈希));
+    const 第二次十六进制 = 第二次哈希数组.map(字节 => 字节.toString(16).padStart(2, '0')).join('');
 
-  return 第二次十六进制.toLowerCase();
+    return 第二次十六进制.toLowerCase();
 }
 
 async function 验证反代IP(反代IP地址, 指定端口) {
-  const 最大重试次数 = 4;
-  let 最后错误 = null;
-  const 开始时间 = performance.now();
-  // 对于连接级别的重试，每次都重新建立连接
-  for (let 重试次数 = 0; 重试次数 < 最大重试次数; 重试次数++) {
-    let TCP接口 = null;
-    let 传输数据 = null;
-    let 读取数据 = null;
+    const 最大重试次数 = 4;
+    let 最后错误 = null;
+    const 开始时间 = performance.now();
+    // 对于连接级别的重试，每次都重新建立连接
+    for (let 重试次数 = 0; 重试次数 < 最大重试次数; 重试次数++) {
+        let TCP接口 = null;
+        let 传输数据 = null;
+        let 读取数据 = null;
 
-    try {
-      // 每次重试都重新建立连接
-      const 连接超时 = 1000 + (重试次数 * 500); // 递增超时时间
-      TCP接口 = await 带超时连接({ hostname: 反代IP地址, port: 指定端口 }, 连接超时);
-
-      传输数据 = TCP接口.writable.getWriter();
-      读取数据 = TCP接口.readable.getReader();
-
-      // 发送TLS握手
-      await 传输数据.write(构建TLS握手());
-
-      // 读取响应，超时时间也递增
-      const 读取超时 = 连接超时;
-      const { value: 返回数据, 超时 } = await 带超时读取(读取数据, 读取超时);
-
-      if (超时) {
-        最后错误 = `第${重试次数 + 1}次重试：读取响应超时`;
-        throw new Error(最后错误);
-      }
-
-      if (!返回数据 || 返回数据.length === 0) {
-        最后错误 = `第${重试次数 + 1}次重试：未收到任何响应数据`;
-        throw new Error(最后错误);
-      }
-
-      // 检查TLS响应
-      if (返回数据[0] === 0x16) {
-        // 成功，清理资源
         try {
-          读取数据.cancel();
-          TCP接口.close();
-        } catch (cleanupError) {
-          console.log('清理资源时出错:', cleanupError);
+            // 每次重试都重新建立连接
+            const 连接超时 = 1000 + (重试次数 * 500); // 递增超时时间
+            TCP接口 = await 带超时连接({ hostname: 反代IP地址, port: 指定端口 }, 连接超时);
+
+            传输数据 = TCP接口.writable.getWriter();
+            读取数据 = TCP接口.readable.getReader();
+
+            // 发送TLS握手
+            await 传输数据.write(构建TLS握手());
+
+            // 读取响应，超时时间也递增
+            const 读取超时 = 连接超时;
+            const { value: 返回数据, 超时 } = await 带超时读取(读取数据, 读取超时);
+
+            if (超时) {
+                最后错误 = `第${重试次数 + 1}次重试：读取响应超时`;
+                throw new Error(最后错误);
+            }
+
+            if (!返回数据 || 返回数据.length === 0) {
+                最后错误 = `第${重试次数 + 1}次重试：未收到任何响应数据`;
+                throw new Error(最后错误);
+            }
+
+            // 检查TLS响应
+            if (返回数据[0] === 0x16) {
+                // 成功，清理资源
+                try {
+                    读取数据.cancel();
+                    TCP接口.close();
+                } catch (cleanupError) {
+                    console.log('清理资源时出错:', cleanupError);
+                }
+                return [true, `第${重试次数 + 1}次验证有效ProxyIP`, Math.round(performance.now() - 开始时间)];
+            } else {
+                最后错误 = `第${重试次数 + 1}次重试：收到非TLS响应(0x${返回数据[0].toString(16).padStart(2, '0')})`;
+                throw new Error(最后错误);
+            }
+
+        } catch (error) {
+            // 记录具体错误
+            最后错误 = `第${重试次数 + 1}次重试失败: ${error.message || error.toString()}`;
+
+            // 判断是否应该继续重试
+            const 错误信息 = error.message || error.toString();
+            const 不应重试的错误 = [
+                '连接被拒绝',
+                'Connection refused',
+                '网络不可达',
+                'Network unreachable',
+                '主机不可达',
+                'Host unreachable'
+            ];
+
+            const 应该停止重试 = 不应重试的错误.some(errorPattern =>
+                错误信息.toLowerCase().includes(errorPattern.toLowerCase())
+            );
+
+            if (应该停止重试) {
+                最后错误 = `连接失败，无需重试: ${错误信息}`;
+                break; // 跳出重试循环
+            }
+
+        } finally {
+            // 确保每次重试后都清理资源
+            try {
+                if (读取数据) {
+                    读取数据.cancel();
+                }
+                if (TCP接口) {
+                    TCP接口.close();
+                }
+            } catch (cleanupError) {
+                console.log('清理资源时出错:', cleanupError);
+            }
+
+            // 等待资源完全释放
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
-        return [true, `第${重试次数 + 1}次验证有效ProxyIP`, Math.round(performance.now() - 开始时间)];
-      } else {
-        最后错误 = `第${重试次数 + 1}次重试：收到非TLS响应(0x${返回数据[0].toString(16).padStart(2, '0')})`;
-        throw new Error(最后错误);
-      }
 
-    } catch (error) {
-      // 记录具体错误
-      最后错误 = `第${重试次数 + 1}次重试失败: ${error.message || error.toString()}`;
-
-      // 判断是否应该继续重试
-      const 错误信息 = error.message || error.toString();
-      const 不应重试的错误 = [
-        '连接被拒绝',
-        'Connection refused',
-        '网络不可达',
-        'Network unreachable',
-        '主机不可达',
-        'Host unreachable'
-      ];
-
-      const 应该停止重试 = 不应重试的错误.some(errorPattern =>
-        错误信息.toLowerCase().includes(errorPattern.toLowerCase())
-      );
-
-      if (应该停止重试) {
-        最后错误 = `连接失败，无需重试: ${错误信息}`;
-        break; // 跳出重试循环
-      }
-
-    } finally {
-      // 确保每次重试后都清理资源
-      try {
-        if (读取数据) {
-          读取数据.cancel();
+        // 如果不是最后一次重试，等待一段时间再重试
+        if (重试次数 < 最大重试次数 - 1) {
+            const 等待时间 = 200 + (重试次数 * 300); // 递增等待时间
+            await new Promise(resolve => setTimeout(resolve, 等待时间));
         }
-        if (TCP接口) {
-          TCP接口.close();
-        }
-      } catch (cleanupError) {
-        console.log('清理资源时出错:', cleanupError);
-      }
-
-      // 等待资源完全释放
-      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
-    // 如果不是最后一次重试，等待一段时间再重试
-    if (重试次数 < 最大重试次数 - 1) {
-      const 等待时间 = 200 + (重试次数 * 300); // 递增等待时间
-      await new Promise(resolve => setTimeout(resolve, 等待时间));
-    }
-  }
-
-  // 所有重试都失败了
-  return [false, 最后错误 || '连接验证失败', -1];
+    // 所有重试都失败了
+    return [false, 最后错误 || '连接验证失败', -1];
 }
 
 function 构建TLS握手() {
-  const hexStr =
-    '16030107a30100079f0303af1f4d78be2002cf63e8c727224cf1ee4a8ac89a0ad04bc54cbed5cd7c830880203d8326ae1d1d076ec749df65de6d21dec7371c589056c0a548e31624e121001e0020baba130113021303c02bc02fc02cc030cca9cca8c013c014009c009d002f0035010007361a1a0000000a000c000acaca11ec001d00170018fe0d00ba0000010001fc00206a2fb0535a0a5e565c8a61dcb381bab5636f1502bbd09fe491c66a2d175095370090dd4d770fc5e14f4a0e13cfd919a532d04c62eb4a53f67b1375bf237538cea180470d942bdde74611afe80d70ad25afb1d5f02b2b4eed784bc2420c759a742885f6ca982b25d0fdd7d8f618b7f7bc10172f61d446d8f8a6766f3587abbae805b8ef40fcb819194ac49e91c6c3762775f8dc269b82a21ddccc9f6f43be62323147b411475e47ea2c4efe52ef2cef5c7b32000d00120010040308040401050308050501080606010010000e000c02683208687474702f312e31000b0002010000050005010000000044cd00050003026832001b00030200020017000000230000002d000201010012000000000010000e00000b636861746770742e636f6dff01000100002b0007061a1a03040303003304ef04edcaca00010011ec04c05eac5510812e46c13826d28279b13ce62b6464e01ae1bb6d49640e57fb3191c656c4b0167c246930699d4f467c19d60dacaa86933a49e5c97390c3249db33c1aa59f47205701419461569cb01a22b4378f5f3bb21d952700f250a6156841f2cc952c75517a481112653400913f9ab58982a3f2d0010aba5ae99a2d69f6617a4220cd616de58ccbf5d10c5c68150152b60e2797521573b10413cb7a3aab25409d426a5b64a9f3134e01dc0dd0fc1a650c7aafec00ca4b4dddb64c402252c1c69ca347bb7e49b52b214a7768657a808419173bcbea8aa5a8721f17c82bc6636189b9ee7921faa76103695a638585fe678bcbb8725831900f808863a74c52a1b2caf61f1dec4a9016261c96720c221f45546ce0e93af3276dd090572db778a865a07189ae4f1a64c6dbaa25a5b71316025bd13a6012994257929d199a7d90a59285c75bd4727a8c93484465d62379cd110170073aad2a3fd947087634574315c09a7ccb60c301d59a7c37a330253a994a6857b8556ce0ac3cda4c6fe3855502f344c0c8160313a3732bce289b6bda207301e7b318277331578f370ccbcd3730890b552373afeb162c0cb59790f79559123b2d437308061608a704626233d9f73d18826e27f1c00157b792460eda9b35d48b4515a17c6125bdb96b114503c99e7043b112a398888318b956a012797c8a039a51147b8a58071793c14a3611fb0424e865f48a61cac7c43088c634161cea089921d229e1a370effc5eff2215197541394854a201a6ebf74942226573bb95710454bd27a52d444690837d04611b676269873c50c3406a79077e6606478a841f96f7b076a2230fd34f3eea301b77bf00750c28357a9df5b04f192b9c0bbf4f71891f1842482856b021280143ae74356c5e6a8e3273893086a90daa7a92426d8c370a45e3906994b8fa7a57d66b503745521e40948e83641de2a751b4a836da54f2da413074c3d856c954250b5c8332f1761e616437e527c0840bc57d522529b9259ccac34d7a3888f0aade0a66c392458cc1a698443052413217d29fbb9a1124797638d76100f82807934d58f30fcff33197fc171cfa3b0daa7f729591b1d7389ad476fde2328af74effd946265b3b81fa33066923db476f71babac30b590e05a7ba2b22f86925abca7ef8058c2481278dd9a240c8816bba6b5e6603e30670dffa7e6e3b995b0b18ec404614198a43a07897d84b439878d179c7d6895ac3f42ecb7998d4491060d2b8a5316110830c3f20a3d9a488a85976545917124c1eb6eb7314ea9696712b7bcab1cfd2b66e5a85106b2f651ab4b8a145e18ac41f39a394da9f327c5c92d4a297a0c94d1b8dcc3b111a700ac8d81c45f983ca029fd2887ad4113c7a23badf807c6d0068b4fa7148402aae15cc55971b57669a4840a22301caaec392a6ea6d46dab63890594d41545ebc2267297e3f4146073814bb3239b3e566684293b9732894193e71f3b388228641bb8be6f5847abb9072d269cb40b353b6aa3259ccb7e438d6a37ffa8cc1b7e4911575c41501321769900d19792aa3cfbe58b0aaf91c91d3b63900697279ad6c1aa44897a07d937e0d5826c24439420ca5d8a63630655ce9161e58d286fc885fcd9b19d096080225d16c89939a24aa1e98632d497b5604073b13f65bdfddc1de4b40d2a829b0521010c5f0f241b1ccc759049579db79983434fac2748829b33f001d0020a8e86c9d3958e0257c867e59c8082238a1ea0a9f2cac9e41f9b3cb0294f34b484a4a000100002900eb00c600c0afc8dade37ae62fa550c8aa50660d8e73585636748040b8e01d67161878276b1ec1ee2aff7614889bb6a36d2bdf9ca097ff6d7bf05c4de1d65c2b8db641f1c8dfbd59c9f7e0fed0b8e0394567eda55173d198e9ca40883b291ab4cada1a91ca8306ca1c37e047ebfe12b95164219b06a24711c2182f5e37374d43c668d45a3ca05eda90e90e510e628b4cfa7ae880502dae9a70a8eced26ad4b3c2f05d77f136cfaa622e40eb084dd3eb52e23a9aeff6ae9018100af38acfd1f6ce5d8c53c4a61c547258002120fe93e5c7a5c9c1a04bf06858c4dd52b01875844e15582dd566d03f41133183a0';
-  return new Uint8Array(hexStr.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+    const hexStr =
+        '16030107a30100079f0303af1f4d78be2002cf63e8c727224cf1ee4a8ac89a0ad04bc54cbed5cd7c830880203d8326ae1d1d076ec749df65de6d21dec7371c589056c0a548e31624e121001e0020baba130113021303c02bc02fc02cc030cca9cca8c013c014009c009d002f0035010007361a1a0000000a000c000acaca11ec001d00170018fe0d00ba0000010001fc00206a2fb0535a0a5e565c8a61dcb381bab5636f1502bbd09fe491c66a2d175095370090dd4d770fc5e14f4a0e13cfd919a532d04c62eb4a53f67b1375bf237538cea180470d942bdde74611afe80d70ad25afb1d5f02b2b4eed784bc2420c759a742885f6ca982b25d0fdd7d8f618b7f7bc10172f61d446d8f8a6766f3587abbae805b8ef40fcb819194ac49e91c6c3762775f8dc269b82a21ddccc9f6f43be62323147b411475e47ea2c4efe52ef2cef5c7b32000d00120010040308040401050308050501080606010010000e000c02683208687474702f312e31000b0002010000050005010000000044cd00050003026832001b00030200020017000000230000002d000201010012000000000010000e00000b636861746770742e636f6dff01000100002b0007061a1a03040303003304ef04edcaca00010011ec04c05eac5510812e46c13826d28279b13ce62b6464e01ae1bb6d49640e57fb3191c656c4b0167c246930699d4f467c19d60dacaa86933a49e5c97390c3249db33c1aa59f47205701419461569cb01a22b4378f5f3bb21d952700f250a6156841f2cc952c75517a481112653400913f9ab58982a3f2d0010aba5ae99a2d69f6617a4220cd616de58ccbf5d10c5c68150152b60e2797521573b10413cb7a3aab25409d426a5b64a9f3134e01dc0dd0fc1a650c7aafec00ca4b4dddb64c402252c1c69ca347bb7e49b52b214a7768657a808419173bcbea8aa5a8721f17c82bc6636189b9ee7921faa76103695a638585fe678bcbb8725831900f808863a74c52a1b2caf61f1dec4a9016261c96720c221f45546ce0e93af3276dd090572db778a865a07189ae4f1a64c6dbaa25a5b71316025bd13a6012994257929d199a7d90a59285c75bd4727a8c93484465d62379cd110170073aad2a3fd947087634574315c09a7ccb60c301d59a7c37a330253a994a6857b8556ce0ac3cda4c6fe3855502f344c0c8160313a3732bce289b6bda207301e7b318277331578f370ccbcd3730890b552373afeb162c0cb59790f79559123b2d437308061608a704626233d9f73d18826e27f1c00157b792460eda9b35d48b4515a17c6125bdb96b114503c99e7043b112a398888318b956a012797c8a039a51147b8a58071793c14a3611fb0424e865f48a61cac7c43088c634161cea089921d229e1a370effc5eff2215197541394854a201a6ebf74942226573bb95710454bd27a52d444690837d04611b676269873c50c3406a79077e6606478a841f96f7b076a2230fd34f3eea301b77bf00750c28357a9df5b04f192b9c0bbf4f71891f1842482856b021280143ae74356c5e6a8e3273893086a90daa7a92426d8c370a45e3906994b8fa7a57d66b503745521e40948e83641de2a751b4a836da54f2da413074c3d856c954250b5c8332f1761e616437e527c0840bc57d522529b9259ccac34d7a3888f0aade0a66c392458cc1a698443052413217d29fbb9a1124797638d76100f82807934d58f30fcff33197fc171cfa3b0daa7f729591b1d7389ad476fde2328af74effd946265b3b81fa33066923db476f71babac30b590e05a7ba2b22f86925abca7ef8058c2481278dd9a240c8816bba6b5e6603e30670dffa7e6e3b995b0b18ec404614198a43a07897d84b439878d179c7d6895ac3f42ecb7998d4491060d2b8a5316110830c3f20a3d9a488a85976545917124c1eb6eb7314ea9696712b7bcab1cfd2b66e5a85106b2f651ab4b8a145e18ac41f39a394da9f327c5c92d4a297a0c94d1b8dcc3b111a700ac8d81c45f983ca029fd2887ad4113c7a23badf807c6d0068b4fa7148402aae15cc55971b57669a4840a22301caaec392a6ea6d46dab63890594d41545ebc2267297e3f4146073814bb3239b3e566684293b9732894193e71f3b388228641bb8be6f5847abb9072d269cb40b353b6aa3259ccb7e438d6a37ffa8cc1b7e4911575c41501321769900d19792aa3cfbe58b0aaf91c91d3b63900697279ad6c1aa44897a07d937e0d5826c24439420ca5d8a63630655ce9161e58d286fc885fcd9b19d096080225d16c89939a24aa1e98632d497b5604073b13f65bdfddc1de4b40d2a829b0521010c5f0f241b1ccc759049579db79983434fac2748829b33f001d0020a8e86c9d3958e0257c867e59c8082238a1ea0a9f2cac9e41f9b3cb0294f34b484a4a000100002900eb00c600c0afc8dade37ae62fa550c8aa50660d8e73585636748040b8e01d67161878276b1ec1ee2aff7614889bb6a36d2bdf9ca097ff6d7bf05c4de1d65c2b8db641f1c8dfbd59c9f7e0fed0b8e0394567eda55173d198e9ca40883b291ab4cada1a91ca8306ca1c37e047ebfe12b95164219b06a24711c2182f5e37374d43c668d45a3ca05eda90e90e510e628b4cfa7ae880502dae9a70a8eced26ad4b3c2f05d77f136cfaa622e40eb084dd3eb52e23a9aeff6ae9018100af38acfd1f6ce5d8c53c4a61c547258002120fe93e5c7a5c9c1a04bf06858c4dd52b01875844e15582dd566d03f41133183a0';
+    return new Uint8Array(hexStr.match(/.{1,2}/g).map(b => parseInt(b, 16)));
 }
 
 async function 带超时连接({ hostname, port }, 超时时间) {
-  const TCP接口 = connect({ hostname, port });
-  try {
-    await Promise.race([
-      TCP接口.opened,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("连接超时")), 超时时间)
-      ),
-    ]);
-    return TCP接口; // ✅ 连接成功
-  } catch (err) {
-    TCP接口.close?.(); // 确保连接关闭
-    throw err; // ⛔ 抛出错误由调用者处理
-  }
+    const TCP接口 = connect({ hostname, port });
+    try {
+        await Promise.race([
+            TCP接口.opened,
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("连接超时")), 超时时间)
+            ),
+        ]);
+        return TCP接口; // ✅ 连接成功
+    } catch (err) {
+        TCP接口.close?.(); // 确保连接关闭
+        throw err; // ⛔ 抛出错误由调用者处理
+    }
 }
 function 带超时读取(reader, 超时) {
-  return new Promise(resolve => {
-    const timeoutId = setTimeout(() => resolve({ done: true, value: null, 超时: true }), 超时);
-    reader.read().then(result => {
-      clearTimeout(timeoutId);
-      resolve({ ...result, 超时: false });
+    return new Promise(resolve => {
+        const timeoutId = setTimeout(() => resolve({ done: true, value: null, 超时: true }), 超时);
+        reader.read().then(result => {
+            clearTimeout(timeoutId);
+            resolve({ ...result, 超时: false });
+        });
     });
-  });
 }
 
 async function nginx() {
-  const text = `
+    const text = `
     <!DOCTYPE html>
     <html>
     <head>
@@ -532,12 +560,12 @@ async function nginx() {
     </body>
     </html>
     `
-  return text;
+    return text;
 }
 
 async function HTML(hostname, 网站图标) {
-  // 首页 HTML
-  const html = `<!DOCTYPE html>
+    // 首页 HTML
+    const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -1154,6 +1182,84 @@ async function HTML(hostname, 网站图标) {
         padding: 10px 12px;
       }
     }
+
+    /* 模态框样式 */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 2000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.6);
+    backdrop-filter: blur(5px);
+}
+
+.modal-content {
+    background-color: var(--bg-primary);
+    margin: 5% auto;
+    padding: 24px;
+    border-radius: var(--border-radius);
+    width: 90%;
+    max-width: 650px;
+    max-height: 80vh;
+    overflow-y: auto;
+    position: relative;
+    box-shadow: var(--shadow-lg);
+}
+
+.close-modal {
+    position: absolute;
+    right: 20px;
+    top: 15px;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+
+.btn-info {
+    background: var(--secondary-color);
+    color: white;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    border: none;
+    cursor: pointer;
+    margin-left: 8px;
+}
+
+.modal-body pre {
+    background: #f4f4f4;
+    padding: 15px;
+    border-radius: 8px;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.detail-section {
+    background: #f9f9f9;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 15px;
+    border: 1px solid #eee;
+}
+.detail-section h4 {
+    margin-bottom: 10px;
+    color: var(--primary-color);
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 5px;
+}
+.detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    font-size: 0.9em;
+}
+@media (max-width: 600px) {
+    .detail-grid { grid-template-columns: 1fr; }
+}
   </style>
 </head>
 <body>
@@ -1285,12 +1391,24 @@ curl "https://${hostname}/check?proxyip=1.2.3.4:443"
       </div>
     </div>
     
+    <div id="ipModal" class="modal">
+    <div class="modal-content">
+        <span class="close-modal">&times;</span>
+        <h3 id="modalTitle" style="margin-bottom: 15px;">IP 详细信息</h3>
+        <div id="modalBody" class="modal-body">
+            <p>正在加载...</p>
+        </div>
+    </div>
+</div>
+
+    
     <div class="footer">
       <p style="margin-top: 8px; opacity: 0.8;">© 2025 Check ProxyIP - 基于 Cloudflare Workers 构建的高性能 ProxyIP 验证服务 | 由 <strong>cmliu</strong> 开发</p>
     </div>
   </div>
 
   <div id="toast" class="toast"></div>
+
 
   <script>
     // 全局变量
@@ -1653,6 +1771,7 @@ curl "https://${hostname}/check?proxyip=1.2.3.4:443"
                   <strong>IP:</strong>
                   \${createCopyButton(ip)}
                   <span id="ip-info-\${index}" style="color: var(--text-secondary);">获取信息中...</span>
+                  <button class="btn-info" onclick="showIPDetails('\${ip}')">详情</button>
                   <span class="status-icon" id="status-icon-\${index}">🔄</span>
                 </div>
               </div>
@@ -1804,12 +1923,122 @@ curl "https://${hostname}/check?proxyip=1.2.3.4:443"
         return { success: false, error: error.message };
       }
     }
+    
+    // 2. 添加详情查询和弹窗函数
+    async function showIPDetails(ip) {
+        const modal = document.getElementById('ipModal');
+        const modalBody = document.getElementById('modalBody');
+        modal.style.display = \"block\";
+        modalBody.innerHTML = '<div style=\\"text-align:center; padding:20px;\\">正在深度查询 IP 详细信息...</div>';
+    
+        try {
+            const response = await fetch(\`https://api.ipapi.is/?ip=\${ip}\`);
+            const data = await response.json();
+    
+            if (data.status === 'error') throw new Error(data.message);
+    
+            // --- 评分处理逻辑 ---
+            // 提取字符串中的数字，例如从 "0.003 (Low)" 提取出 0.003
+            const rawScore = data.company?.abuser_score || "0";
+            const scoreNum = parseFloat(rawScore.toString().replace(/[^\\d.]/g, '')) || 0;
+            
+            // 转换为百分数显示
+            const displayPercent = (scoreNum * 100).toFixed(2);
+            
+            // 根据数值定义等级
+            let scoreLevel = "极度纯净";
+            let scoreColor = "#27ae60";
+            if (scoreNum > 0.05) { scoreLevel = "中等风险"; scoreColor = "#f39c12"; }
+            if (scoreNum > 0.2) { scoreLevel = "高风险"; scoreColor = "#e74c3c"; }
+            // ------------------
+            
+            modalBody.innerHTML = \`
+                <div style="font-size: 0.85em; color: #666; margin-bottom: 15px;">IP 详细信息数据来源: ipapi.is</div>
+                
+                <div class="detail-section">
+                    <h4 style="margin-top:0">📍 基本信息</h4>
+                    <div class="detail-grid">
+                        <div><strong>IP 地址:</strong> <span style="color:var(--primary-color); font-weight:bold;">\${data.ip}</span></div>
+                        <div><strong>区域注册机构:</strong> \${data.rir || '未知'}</div>
+                        <div><strong>运营商/ASN类型:</strong> \${data.is_datacenter ? '机房' : '住宅'} / \${data.asn?.type || '未知'}</div>
+                        <div><strong>综合滥用评分:</strong> <span style="color:\${scoreColor}; font-weight:bold;">\${displayPercent}% \${scoreLevel}</span></div>
+                    </div>
+                </div>
+    
+                <div class="detail-section">
+                    <h4>🛡️ 安全检测</h4>
+                    <div class="detail-grid">
+                        <div><strong>移动网络:</strong> \${data.is_mobile ? '⚠️ 是' : '✅ 否'}</div>
+                        <div><strong>数据中心:</strong> \${data.is_datacenter ? '🏢 是' : '✅ 否'}</div>
+                        <div><strong>卫星网络:</strong> \${data.is_satellite ? '⚠️ 是' : '✅ 否'}</div>
+                        <div><strong>爬虫:</strong> \${data.is_crawler ? '⚠️ 是' : '✅ 否'}</div>
+                        <div><strong>代理服务器:</strong> \${data.is_proxy ? '⚠️ 是' : '✅ 否'}</div>
+                        <div><strong>VPN:</strong> \${data.is_vpn ? '⚠️ 是' : '✅ 否'}</div>
+                        <div><strong>Tor 网络:</strong> \${data.is_tor ? '⚠️ 是' : '✅ 否'}</div>
+                        <div><strong>滥用 IP:</strong> \${data.is_abuser ? '⚠️ 是' : '✅ 否'}</div>
+                    </div>
+                </div>
+    
+                <div class="detail-section">
+                    <h4>🌍 位置信息</h4>
+                    <div class="detail-grid">
+                        <div><strong>国家:</strong> \${data.location?.country} (\${data.location?.country_code})</div>
+                        <div><strong>省份/州:</strong> \${data.location?.state || 'N/A'}</div>
+                        <div><strong>城市:</strong> \${data.location?.city}</div>
+                        <div><strong>邮编:</strong> \${data.location?.zip}</div>
+                        <div><strong>坐标:</strong> \${data.location?.latitude}, \${data.location?.longitude}</div>
+                        <div><strong>时区:</strong> \${data.location?.timezone}</div>
+                        <div><strong>当地时间:</strong> \${data.location?.local_time || 'N/A'}</div>
+                        <div><strong>欧盟成员:</strong> \${data.location?.is_eu_member ? '是' : '否'}</div>
+                    </div>
+                </div>
+    
+                <div class="detail-section">
+                    <h4>🏢 运营商 & 🔢 ASN 信息</h4>
+                    <div class="detail-grid">
+                        <div><strong>运营商名称:</strong> \${data.company?.name || '未知'}</div>
+                        <div><strong>域名:</strong> \${data.company?.domain || 'N/A'}</div>
+                        <div><strong>ASN 编号:</strong> AS\${data.asn?.asn}</div>
+                        <div><strong>组织:</strong> \${data.asn?.org}</div>
+                        <div><strong>路由:</strong> \${data.asn?.route}</div>
+                        <div><strong>网络范围:</strong> \${data.asn?.descr}</div>
+                    </div>
+                </div>
+    
+                <div class="detail-section" style="background: #fff5f5; border-left: 4px solid #e74c3c;">
+                    <h4>📧 滥用举报联系方式</h4>
+                    <div style="font-size:0.9em">
+                        <div><strong>联系人:</strong> \${data.abuse?.name || 'N/A'}</div>
+                        <div><strong>邮箱:</strong> <a href="mailto:\${data.abuse?.email}">\${data.abuse?.email}</a></div>
+                        <div><strong>电话:</strong> \${data.abuse?.phone || 'N/A'}</div>
+                        <div><strong>地址:</strong> \${data.abuse?.address || 'N/A'}</div>
+                    </div>
+                </div>
+    
+                <details style="margin-top:20px;">
+                    <summary style="cursor:pointer; color:#999; font-size:0.8em">查看原始 JSON 数据</summary>
+                    <pre style="background:#f4f4f4; padding:10px; border-radius:5px; font-size:11px; overflow-x:auto;">\${JSON.stringify(data, null, 2)}</pre>
+                </details>
+            \`;
+        } catch (error) {
+            modalBody.innerHTML = \`<p style="color:red; text-align:center;">加载失败: \${error.message}</p>\`;
+        }
+    }
+    // 3. 点击关闭按钮或背景关闭模态框
+    document.querySelector('.close-modal').onclick = () => {
+        document.getElementById('ipModal').style.display = "none";
+    };
+    window.onclick = (event) => {
+        const modal = document.getElementById('ipModal');
+        if (event.target == modal) modal.style.display = "none";
+    };
   </script>
 </body>
 </html>
 `;
 
-  return new Response(html, {
-    headers: { "content-type": "text/html;charset=UTF-8" }
-  });
+    return new Response(html, {
+        headers: { "content-type": "text/html;charset=UTF-8" }
+    });
+
 }
